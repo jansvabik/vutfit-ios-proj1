@@ -1,0 +1,358 @@
+#!/usr/bin/env bash
+
+# IOS, proj1
+# Jan Svabik (xsvabi00)
+# VUT FIT, 1BIT LS
+
+POSIXLY_CORRECT=yes
+
+# allowed values
+declare -a filterindicators=("-a" "-b" "-ip" "-uri")
+declare -a commandindicators=("list-ip" "list-hosts" "list-uri" "hist-ip" "hist-load")
+
+# useful arrays
+declare -a filters=()
+declare -a filteredlogs=()
+declare -a prefilteredlogs=()
+
+# arrays for lists
+declare -a iplist=()
+declare -a hostlist=()
+declare -a urilist=()
+declare -a histcount=()
+declare -a hist=()
+declare -a datelist=()
+
+# variables
+command=""
+
+# get position of an array item
+function getitempos {
+    find=$1
+    shift
+    arr=($@)
+    pos=-1
+    for ((i=0; i < ${#arr[@]}; i++)); do
+        if [[ "${arr[$i]}" == "$find" ]]; then
+            pos=$i
+            break
+        fi
+    done
+ 
+    echo "$pos"
+}
+
+# function for loading the lines of logs
+function filterlogs {
+    # set the array delimiter
+    IFS=$'\n'
+
+    # load lines from file
+    if [[ "$1" == *".gz" ]]; then
+        lines=$(zcat < "$1")
+    else
+        lines=$(cat < "$1")
+    fi
+
+    # extract each line
+    for item in $lines; do
+        filteredlogs+=("$item")
+    done
+
+    # reset the delimiter
+    unset IFS
+}
+
+# function for comparing IPs
+# TODO: ipv6 comparing compressed verions (:: == 0000:0000:0000:0000:0000:0000:0000:0000 -> yes)
+function ipequals {
+    ip1=$1
+    ip2=$2
+
+    if [ "$ip1" = "$ip2" ]; then
+        echo "yes"
+    else
+        echo "no"
+    fi
+}
+
+# check the filter
+a=1
+while [[ $(getitempos "${!a}" "${filterindicators[*]}") != -1 ]]; do
+    # save filter and its value for later use
+    filtersnewvalue=${!a}
+    ((a++))
+
+    # check that the date is only in the allowed format
+    if [[ $filtersnewvalue == "-a" ]] || [[ $filtersnewvalue == "-b" ]]; then
+        if [[ $(echo "${!a}" | sed -n 's/^\([0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\} [0-9]\{2\}:[0-9]\{2\}:[0-9]\{2\}\)$/\1/p') != "${!a}" ]]; then
+            echo "The date is in wrong format. The only allowed format is \"YYYY-MM-DD HH:MM:SS\"." >&2
+            exit 1
+        fi
+    fi
+
+    # check that the date is only in the allowed format
+    if [[ $filtersnewvalue == "-ip" ]]; then
+        if [[ $(echo "${!a}" | sed -n 's/^\([0-9a-fA-F\.\:]*\)$/\1/p') != "${!a}" ]]; then
+            echo "You have a typo in the IP." >&2
+            exit 1
+        fi
+    fi
+
+    # save the filter and its value
+    filtersnewvalue="$filtersnewvalue;${!a}"
+    ((a++))
+
+    filters+=("$filtersnewvalue")
+done
+
+# check the command
+if [[ $(getitempos "${!a}" "${commandindicators[*]}") != -1 ]]; then
+    command=${!a}
+    ((a++))
+fi
+
+# check the log files
+if [ $(($#-a+1)) -gt 0 ]; then
+    # send each log file to processlines function
+    while [ $a -lt $(($#+1)) ]; do
+        # check that the file exists
+        if [ -f ${!a} ]; then
+            filterlogs ${!a}
+        else
+            echo "The file '${!a}' cannot be loaded. This file does not exist." >&2
+            exit 1
+        fi
+
+        ((a++))
+    done
+else
+    # process the lines from stdin
+    filterlogs /dev/stdin
+fi
+
+# extract uri from log
+function loaduri {
+    echo "$1" | sed -n 's/\(^.*\] \)\(\"[A-Z]* \)\(.*\) HTTP.*$/\3/p'
+}
+
+# extract date from log
+function loaddate {
+    echo "$1" | sed -n 's/^.*\[\([0-9a-zA-Z\/\:]*\) \+.*\].*$/\1/p'
+}
+
+# extract ip from log
+function loadip {
+    echo "$1" | sed -n 's/\(^[0-9a-fA-F\.\:]*\).*$/\1/p'
+}
+
+# get host from ip
+function gethost {
+    host "$1" | sed -n 's/\(.* pointer \)\(.*\)\./\2/p'
+}
+
+# transform month name to number
+function monthnametonumber {
+    case $1 in
+        "Jan") echo "01";;
+        "Feb") echo "02";;
+        "Mar") echo "03";;
+        "Apr") echo "04";;
+        "May") echo "05";;
+        "Jun") echo "06";;
+        "Jul") echo "07";;
+        "Aug") echo "08";;
+        "Sep") echo "09";;
+        "Oct") echo "10";;
+        "Nov") echo "11";;
+        "Dec") echo "12";;
+    esac
+}
+
+# get date string for simple comparing
+function getdatecmpstring {
+    date=$(loaddate "$1")
+    IFS=':'; ldatetime=($date); unset IFS
+    IFS='/'; logd=(${ldatetime[0]}); unset IFS;
+
+    cmpstring="${logd[2]}$(monthnametonumber ${logd[1]})${logd[0]}${ldatetime[1]}00"
+
+    echo $cmpstring
+}
+
+# apply every filter from filters
+for ((i = 0; i < ${#filters[@]}; i++)); do
+    # split this filter into type and value
+    IFS=';'; filterdata=(${filters[$i]}); unset IFS;
+    filtertype="${filterdata[0]}"
+    filtervalue="${filterdata[1]}"
+
+    # the applying itself
+    for ((j = 0; j < ${#filteredlogs[@]}; j++)); do
+        # get log from the array
+        log="${filteredlogs[$j]}"
+
+        # extract data from the current log
+        ip=$(loadip "$log")
+        date=$(loaddate "$log")
+        uri=$(loaduri "$log")
+        
+        # check IP
+        if [ $filtertype == "-ip" ] && [ "$(ipequals $ip $filtervalue)" == "yes" ]; then
+            prefilteredlogs+=("$log")
+        fi
+
+        if [[ $filtertype == "-a" ]] || [[ $filtertype == "-b" ]]; then
+            # split log and argument datetime into time units
+            adatetime=($filtervalue)
+
+            IFS=':'; ldatetime=($date); argt=(${adatetime[1]}); unset IFS
+            IFS='/'; logd=(${ldatetime[0]}); unset IFS;
+            IFS='-'; argd=(${adatetime[0]}); unset IFS;
+
+            # create date strings
+            logdstring="${logd[2]}$(monthnametonumber ${logd[1]})${logd[0]}${ldatetime[1]}${ldatetime[2]}${ldatetime[3]}"
+            argdstring="${argd[0]}${argd[1]}${argd[2]}${argt[0]}${argt[1]}${argt[2]}"
+
+            if [[ $filtertype == "-a" ]] && [[ $argdstring -lt $logdstring ]]; then
+                prefilteredlogs+=("$log")
+            elif [[ $filtertype == "-b" ]] && [[ $argdstring -gt $logdstring ]]; then
+                prefilteredlogs+=("$log")
+            fi
+        fi
+
+        # check URI
+        if [ "$filtertype" == "-uri" ] && [[ $uri =~ $filtervalue ]]; then
+            prefilteredlogs+=("$log")
+        fi
+    done
+
+    # reset arrays
+    filteredlogs=("${prefilteredlogs[@]}")
+    prefilteredlogs=()
+done
+
+# work with the filtered logs
+for ((i = 0; i < ${#filteredlogs[@]}; i++)); do
+    log=${filteredlogs[$i]}
+
+    # no command
+    if [[ $command == "" ]]; then
+        echo "$log"
+
+    # list-ip command
+    elif [[ $command == "list-ip" ]]; then
+        ip=$(loadip "$log")
+        if [[ $(getitempos "$ip" "${iplist[*]}") == -1 ]]; then
+            iplist+=("$ip")
+            echo "$ip"
+        fi
+
+    # list-hosts command
+    elif [[ $command == "list-hosts" ]]; then
+        ip=$(loadip "$log")
+        host=$(gethost "$ip")
+
+        if [[ ! "${iplist[*]}" =~ $ip ]] && [[ ! "${hostlist[*]}" =~ $host ]]; then
+            iplist+=("$ip")            
+            hostlist+=("$host")
+            
+            if [[ $host == "" ]]; then
+                echo "$ip"
+            else
+                echo "$host"
+            fi
+        fi
+
+    # list-uri command
+    elif [[ $command == "list-uri" ]]; then
+        uri=$(loaduri "$log")
+        if [[ ! $uri == "" ]] && [[ ! $(getitempos "$uri" "${urilist[@]}") != -1 ]]; then
+            urilist+=("$uri")
+            echo "$uri"
+        fi
+
+    # hist-ip
+    elif [[ $command == "hist-ip" ]]; then
+        ip=$(loadip "$log")
+
+        # is this ip in iplist?
+        pos=$(getitempos "$ip" "${iplist[@]}")
+        if [[ $pos != -1 ]]; then
+            # add new # to the histogram and increment the counter
+            hist[$pos]="${hist[$pos]}#"
+            ((histcount[pos]++))
+        else
+            iplist+=("$ip")
+            histcount+=(1)
+            hist+=("#")
+        fi
+
+    # hist-load
+    elif [[ $command == "hist-load" ]]; then
+        # only save all datetimes to array, they will be processed down
+        cmpstring=$(getdatecmpstring "$log")
+
+        if [[ ! $(getitempos "$cmpstring" "${datelist[@]}") != -1 ]]; then
+            datelist+=("$cmpstring")
+        fi
+    fi
+done
+
+# find max value in array and return its index
+function findmaxvalue {
+    arr=($@)
+    max=-1
+    index=-1
+    for ((i=0; i < ${#arr[@]}; i++)); do
+        val=${arr[$i]}
+        if [ $max -lt "$val" ]; then
+            max=$val
+            index=$i
+        fi
+    done
+ 
+    echo "$index"
+}
+
+# print the ip histograms
+if [[ $command == "hist-ip" ]]; then
+    for ((i=0; i < ${#hist[@]}; i++)); do
+        # get the next max value
+        max=$(findmaxvalue "${histcount[@]}")
+
+        # print the ip histogram and set zero value
+        echo "${iplist[$max]} (${histcount[$max]}): ${hist[$max]}"
+        histcount[$max]=0
+    done
+fi
+
+# print the datetime histograms
+if [[ $command == "hist-load" ]]; then
+    # array datelist contains unique dates unsorted - sort them
+    IFS=$'\n'; sorted=($(echo "${datelist[*]}" | sort -n)); unset IFS
+    datelist=("${sorted[@]}")
+
+    # increment histogram according to the log dates
+    for ((i=0; i < ${#filteredlogs[@]}; i++)); do
+        log=${filteredlogs[$i]}
+        date=$(getdatecmpstring "$log")
+
+        # find the index of the current date
+        pos=$(getitempos "$date" "${datelist[@]}")
+        if [[ $pos != -1 ]]; then
+            # add new # to the histogram and increment the counter
+            hist[$pos]="${hist[$pos]}#"
+            ((histcount[pos]++))
+        else
+            datelist+=("$date")
+            histcount+=(1)
+            hist+=("#")
+        fi
+    done
+
+    # print the histogram
+    for ((i=0; i < ${#hist[@]}; i++)); do
+        echo "${datelist[$i]:0:4}-${datelist[$i]:4:2}-${datelist[$i]:6:2} ${datelist[$i]:8:2}:00 (${histcount[$i]}): ${hist[$i]}"
+    done
+fi
